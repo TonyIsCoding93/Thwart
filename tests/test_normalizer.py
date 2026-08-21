@@ -2,7 +2,7 @@ from core.normalizer import normalize
 
 
 def test_version_converted_to_int():
-    label, _ = normalize({
+    label, _, _ = normalize({
         "id": "a", "set_id": "b", "version": "3",
         "effective_time": "20210902",
     })
@@ -10,8 +10,7 @@ def test_version_converted_to_int():
     assert isinstance(label["version"], int)
 
 def test_core_fields_excluded_from_sections():
-    label, sections = normalize({
-        "id": "a", "set_id": "b", "version": "3",
+    label, sections, _ = normalize({        "id": "a", "set_id": "b", "version": "3",
         "effective_time": "20210902",
         "warnings": ["Liver warning"],
     })
@@ -21,9 +20,21 @@ def test_core_fields_excluded_from_sections():
     assert "version" not in names
 
 def test_list_values_unwrapped():
-    _, sections = normalize({
+    _, sections, _ = normalize({
         "id": "a", "set_id": "b", "version": "3",
         "effective_time": "20210902",
         "warnings": ["Liver warning"],
     })
     assert sections[0]["content"] == "Liver warning"
+
+def test_empty_sections_are_skipped():
+    _, sections, skipped = normalize({
+        "id": "a", "set_id": "b", "version": "3",
+        "effective_time": "20210902",
+        "warnings": ["Liver warning"],
+        "purpose": ["   "],
+        "questions": [],
+    })
+    names = [s["section_name"] for s in sections]
+    assert names == ["warnings"]
+    assert sorted(skipped) == ["purpose", "questions"]

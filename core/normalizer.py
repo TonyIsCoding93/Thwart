@@ -16,18 +16,23 @@ def normalize(record):
     }
 
     sections = []
+    skipped = []
     for field, value in record.items():
         if field in SKIP_FIELDS:
             continue
 
         if isinstance(value, list):
-            text = value[0]
-        else: 
+            text = value[0] if value else None
+        else:
             text = value
-        
+
+        if text is None or not str(text).strip():
+            skipped.append(field)
+            continue
+
         sections.append({
-        "section_name": field,
+            "section_name": field,
             "content": text,
         })
-    return label, sections
-    
+
+    return label, sections, skipped
