@@ -15,6 +15,9 @@ def run(max_records=1000):
 
     stats = Counter()
     reject_reasons = Counter()
+    empty_sections = Counter()
+
+    
 
     for i, record in enumerate(fetch_all(max_records=max_records), start=1):
         errors = validate(record)
@@ -25,7 +28,9 @@ def run(max_records=1000):
             continue
 
         try:
-            label, sections = normalize(record)
+            label, sections, skipped = normalize(record)
+            for name in skipped:
+                empty_sections[name] += 1
             insert_label(conn, label)
             insert_sections(conn, cache, label["id"], sections)
             stats["inserted"] += 1
@@ -48,6 +53,9 @@ def run(max_records=1000):
     print("\n--- reject reasons ---")
     for reason, count in reject_reasons.most_common():
         print(f"{count:5d}  {reason}")
+    print("\n--- empty sections skipped ---")
+    for name, count in empty_sections.most_common(10):
+        print(f"{count:5d}  {name}")
 
 
 if __name__ == "__main__":
