@@ -1,7 +1,7 @@
 import requests
 
 BASE_URL = "https://api.fda.gov/drug/label.json"
-PAGE_SIZE = 100
+PAGE_SIZE = 1000
 
 
 def fetch_page(skip=0, limit=PAGE_SIZE):

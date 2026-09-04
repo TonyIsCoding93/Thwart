@@ -59,4 +59,4 @@ def run(max_records=1000):
 
 
 if __name__ == "__main__":
-    run(max_records=200)
+    run(max_records=25000)
