@@ -1,30 +1,33 @@
 # Thwart
 
-A Python pipeline that ingests openFDA drug label data, validates each record
-against explicit rules, and normalizes the survivors into a PostgreSQL schema.
+Thwart is a Python pipeline that pulls drug label records from the openFDA
+API, validates each one against a set of required fields, and writes the
+records that pass into a normalized PostgreSQL schema.
 
-Thwart does not clean data. Records that fail validation are rejected with a
-logged reason rather than repaired, and sections with no usable content are
-dropped and reported by name. On drug labeling, a wrong guess is worse than a
-missing record.
+It does not try to repair bad data. Records that fail validation get rejected
+with a logged reason, and sections that have a field name but no content get
+dropped and counted by name. I made that call because a guessed fix on a drug
+label is worse than a missing one.
 
 ## The problem
 
-The openFDA drug label endpoint serves data derived from Structured Product
-Labeling documents that manufacturers submit to the FDA. The FDA's own
-documentation notes there is "considerable variation between drug products in
-terms of these sections and their contents."
+The openFDA drug label endpoint serves data derived from the Structured
+Product Labeling documents that manufacturers submit to the FDA. The FDA's
+documentation says outright that there is "considerable variation between drug
+products in terms of these sections and their contents."
 
-That variation is the engineering problem. A single endpoint serves two
-fundamentally different document types with no field indicating which is which:
+That variation is the problem this project is built around. The same endpoint
+serves two very different kinds of document, and nothing in the record tells
+you which kind you have:
 
-- **Over-the-counter** labels carry sections like `purpose`, `do_not_use`,
-  `ask_doctor`, `keep_out_of_reach_of_children`
-- **Prescription** labels carry sections like `adverse_reactions`,
-  `contraindications`, `nursing_mothers`, `clinical_pharmacology`
+- Over-the-counter labels have sections like `purpose`, `do_not_use`,
+  `ask_doctor`, and `keep_out_of_reach_of_children`
+- Prescription labels have sections like `adverse_reactions`,
+  `contraindications`, `nursing_mothers`, and `clinical_pharmacology`
 
-A 100-record sample contained **93 distinct field names**. Only five appeared
-in 100% of records, and none of them describe the drug:
+Before writing any code I pulled 100 records and counted field names. There
+were 93 distinct fields. Only five of them appeared in every record, and none
+of the five describe the drug itself:
 
 | Coverage | Fields |
 | --- | --- |
@@ -33,27 +36,29 @@ in 100% of records, and none of them describe the drug:
 | 82% | `warnings` |
 | under 20% | 70+ others |
 
-The 99% row is the reason this analysis happened before any code was written.
-A five-record sample showed `indications_and_usage` on every record; at 100
-records it is 99%. Designing off the small sample would have produced a
-`NOT NULL` constraint that fails partway through ingest.
+The 99% row is the reason I did this first. In a five-record sample,
+`indications_and_usage` was on every record, so it looked safe to require. At
+100 records it dropped to 99%. If I had designed the schema off the small
+sample, the `NOT NULL` constraint on that column would have started failing
+partway through a real ingest.
 
 ## Results
 
-A full run against the API pagination ceiling:
+Numbers from a full run up to the API's pagination limit:
 
 | | |
 | --- | --- |
 | Labels ingested | 25,000 |
 | Section rows written | 417,135 |
-| Distinct section types discovered | 138 |
+| Distinct section types found | 138 |
 | Records rejected by validation | 0 |
-| Empty sections filtered | ~1,800 |
+| Empty sections filtered out | about 1,800 |
 | Wall clock | 2m 21s |
-| CPU utilisation | 9% |
+| CPU utilization | 9% |
 
-Section frequency across the run, which is the earlier field-frequency
-analysis re-run against the database instead of a sample:
+Section counts across the run. This is the same field-frequency check as
+above, but run as a query against the database instead of a script against a
+sample:
 
 ```
 spl_product_data_elements              24,977
@@ -66,135 +71,148 @@ active_ingredient                       14,939
 purpose                                 14,626
 ```
 
-`warnings` lands at 75.8% here against 82% in the original sample — close
-enough to confirm the shape, far enough apart to justify not making it
-required.
+`warnings` comes out at 75.8% here, against 82% in the original sample. The
+shape held up, but the gap is big enough that I would not have wanted it as a
+required field.
 
-**138 section types against 92 in a 200-record sample.** The vocabulary has a
-long tail: roughly 46 section types are rare enough to be invisible at small
-sample sizes. All 46 were absorbed as new rows in the lookup table with no
-schema migration and no code change, which is the whole reason for the schema
-below.
+The number I was most interested in was 138 section types. A 200-record sample
+had turned up 92. So there are roughly 46 section types rare enough that you
+will not see them at small sample sizes. All 46 went into the lookup table as
+new rows during the run. No migration, no code change. That was the point of
+the schema design, and this is the first evidence that it held.
 
-**Zero validation rejections across 25,000 records.** The five required fields
-are genuinely universal in this data. This is a result rather than an absence
-of one: it is evidence that the frequency analysis picked the right five.
+Zero records were rejected by validation across all 25,000. I take that as
+confirmation that the five required fields really are universal, which is what
+the frequency analysis predicted.
 
 ## Schema
 
 ```
-label ──< label_section >── section_type
+label --< label_section >-- section_type
 ```
 
-- **`label`** — one row per drug label. Uses the FDA's own `id` as the primary
-  key so rows trace back to the source record.
-- **`label_section`** — one row per section of a label. Two foreign keys:
-  `label_id` and `section_type_id`.
-- **`section_type`** — lookup table, one row per distinct section name, with a
-  `UNIQUE` constraint so the vocabulary cannot fragment on a typo.
+- `label` has one row per drug label. The primary key is the FDA's own `id`,
+  so every row can be traced back to its source record.
+- `label_section` has one row per section of a label, with foreign keys to
+  both `label` and `section_type`.
+- `section_type` is a lookup table with one row per distinct section name. The
+  name column is `UNIQUE`, so a typo cannot quietly create a second version of
+  an existing type.
 
-**Why not one wide table.** A column per section means 138 columns where the
-median column is NULL over 90% of the time, and every new section type the FDA
-introduces requires an `ALTER TABLE` on a table with hundreds of thousands of
-rows. Modelling sections as rows means a new section type is an `INSERT`. This
-was not hypothetical — 46 unseen types appeared between the sample and the full
-run.
+### Why not one wide table
 
-**Why PostgreSQL and not a document store.** The input is inconsistent nested
-JSON, which a document store would ingest with no schema work at all. But the
-input format describes what is easy to load, not what the system is for.
-Thwart's output is relational, its queries are analytical (frequency across all
-labels, labels missing a section), and `NOT NULL` plus foreign key constraints
-act as a second layer of validation behind the Python. A document store would
-have meant doing the validation work and then storing the result somewhere that
-enforces none of it.
+A column per section type would mean 138 columns, and for most rows the
+majority of them would be NULL. Worse, every time the FDA introduces a new
+section type, adding it means an `ALTER TABLE` on a table with hundreds of
+thousands of rows. With sections stored as rows, a new section type is just an
+`INSERT`. During this run, 46 section types that were not in the original
+sample showed up and were handled without any change to the schema.
+
+### Why PostgreSQL instead of a document store
+
+The input is inconsistent nested JSON, and a document store would take it
+as-is with no schema work. I went with Postgres anyway because the input format
+only tells you what is easy to load, not what the system needs to do with the
+data afterward. The output here is relational, the queries I care about are
+aggregate (section frequency across all labels, labels that are missing a
+particular section), and the `NOT NULL` and foreign key constraints give me a
+second layer of validation that runs in the database regardless of what the
+Python does. Storing the result in a document store would have meant doing all
+the validation work and then putting the output somewhere that enforces none
+of it.
 
 ## Design decisions
 
-**Validate, don't clean.** Cleaning is guessing. Turning `"3.0"` into `3`
-requires a judgment call, and so does every case after it — is `""` a zero or a
-missing value, is a month of `13` a typo for January or December. A rejected
-record fails loudly; a mis-cleaned record is silently wrong and looks correct.
+**Validate, do not clean.** Fixing a bad value means guessing what it should
+have been. Converting `"3.0"` to `3` is a judgment call, and so is deciding
+whether `""` means zero or missing, or whether a month value of `13` was meant
+to be January or December. A rejected record is loud and easy to find. A wrongly
+cleaned one looks fine and is not.
 
-**Errors are a list, not a boolean.** `validate()` returns every reason a
-record failed, not just the first. That list is what makes a reject log
-diagnostic instead of a tally.
+**Validation returns a list, not a boolean.** `validate()` returns every
+reason a record failed rather than stopping at the first one. That is what
+makes the reject counts useful for diagnosis instead of just a total.
 
-**The section type cache.** `label_section` needs an integer
-`section_type_id`, but the normalizer produces a name. Resolving that against
-the database per section would mean 417,135 round trips for an answer that
-never changes, so the whole `section_type` table is loaded into a dict at
-startup and consulted in memory. A cache miss means the name is genuinely new,
-so it is inserted and cached in the same step: **138 inserts against 417,135
-lookups, a 99.97% hit rate.**
+**Section type cache.** `label_section` needs an integer `section_type_id`,
+but the normalizer produces a section name. Looking that up in the database
+for every section would be 417,135 round trips for a mapping that never
+changes. Instead the pipeline loads the whole `section_type` table into a dict
+at startup. A cache miss means the name is new, so it gets inserted and added
+to the dict in the same step. Over the full run that came to 138 inserts
+against 417,135 lookups, a 99.97% hit rate.
 
-**Batched commits.** Commits fire every 100 records rather than per record.
-Each commit forces a disk flush, and re-running the pipeline is cheap, so
-throughput wins over losing up to 99 in-flight records on a crash.
+**Batched commits.** The pipeline commits every 100 records instead of after
+each one. Every commit forces a disk flush, and the pipeline is cheap to
+re-run, so I traded the risk of losing up to 99 in-flight records on a crash
+for the throughput.
 
-**Empty sections are dropped in the normalizer, not the writer.** A first run
-produced 34 rows out of 3,567 that had valid foreign keys, pointed at real
-section types, and contained only whitespace — present, but unusable. They are
-now filtered before the writer sees them, so an empty section costs no cache
-lookup and never creates a `section_type` row for a name that only ever appears
-blank. Sections are dropped individually rather than rejecting the whole label,
-since one blank field should not discard an otherwise valid record. The skipped
-names are returned and counted, and the distribution turned out to be diffuse
-rather than systematic — no single field the FDA provisioned and abandoned,
-just individual submissions occasionally shipping a section with no content,
-including sections as important as `warnings`.
+**Empty sections are filtered in the normalizer, not the writer.** An early
+200-record run produced 34 section rows out of 3,567 that had valid foreign
+keys and pointed at real section types but contained nothing except
+whitespace. The field was present, the content was not. The normalizer now
+drops those before the writer sees them, so an empty section never costs a
+cache lookup and never creates a `section_type` row for a name that only ever
+shows up blank. I drop the individual section rather than rejecting the whole
+label, since one blank field should not throw away an otherwise valid record.
+The dropped names are returned and counted. The distribution turned out to be
+spread across many section types rather than concentrated in one, which
+suggests individual submissions occasionally shipping an empty section, not a
+field the FDA defined and never used. `warnings` was in that list.
 
-**Pure core.** `core/` performs no I/O. It takes a dict, computes, and returns
-a value. This is what lets the test suite run in 0.01s with no database and no
-network, and what will let a web frontend import the same validation logic the
-batch pipeline uses rather than reimplementing it.
+**Pure core.** Nothing in `core/` does I/O. Both functions take a dict and
+return a value. That is what lets the test suite run in 0.01s with no database
+and no network, and it is what will let a web frontend call the same
+validation code the batch pipeline uses instead of reimplementing it.
 
 ## Constraint: pagination depth
 
-The dataset is 262,595 records. The API caps `skip` at 25,000:
+The dataset is 262,595 records. The API only lets `skip` go up to 25,000:
 
 ```
-skip=25000  →  200 OK
-skip=26000  →  {"code": "BAD_REQUEST", "message": "Skip value must 25000 or less."}
+skip=25000  ->  200 OK
+skip=26000  ->  {"code": "BAD_REQUEST", "message": "Skip value must 25000 or less."}
 ```
 
-Offset pagination costs the database a scan of every skipped row, so deep pages
-are the most expensive queries in the sequence. Public APIs cap it for load
-protection; openFDA is Elasticsearch-backed, which has this ceiling by default.
+Offset pagination makes the database scan past every skipped row to reach the
+page you asked for, so deep pages get progressively more expensive. Public APIs
+cap the depth to protect themselves. openFDA runs on Elasticsearch, which has
+this limit by default.
 
-Three ways past it, in increasing order of correctness:
+There are three ways around it:
 
-1. **Partition the query.** Slice by `effective_time` year so each search
-   returns under 25,000 and paginate each from `skip=0`. Requires no API
-   support.
-2. **Cursor pagination.** openFDA supports `search_after`, which resumes from a
-   position rather than counting past rows, making page 250 as cheap as page 1.
-3. **Bulk downloads.** The FDA publishes the full dataset as zipped JSON
-   specifically because the API is built for real-time queries rather than
-   export. This is the correct tool for a full ingest.
+1. Partition the query. Search by `effective_time` year so that each result
+   set stays under 25,000, then paginate each one from `skip=0`. This needs
+   nothing from the API.
+2. Cursor pagination. openFDA supports `search_after`, which resumes from a
+   known position instead of counting past rows, so page 250 costs the same as
+   page 1.
+3. Bulk download. The FDA publishes the full dataset as zipped JSON files
+   because the API is meant for live queries rather than exports. For a full
+   ingest this is the right tool.
 
-Because `core/` is I/O-free, any of these is a change to the fetcher alone —
-the validator, normalizer, and writer take a record dict and do not care where
+Because `core/` does no I/O, any of the three is a change to the fetcher only.
+The validator, normalizer, and writer take a record dict and do not care where
 it came from.
 
 ## Performance
 
-The 25,000-record run held at 9% CPU. The pipeline is I/O-bound, not
-compute-bound, and the measurement makes that concrete: raising `PAGE_SIZE`
-from 100 to 1,000 cut request count 10x and took the run from 20,000 records in
-4m 18s to 25,000 records in 2m 21s. More records in half the time, with no
-change to any processing logic.
+CPU stayed at 9% for the whole 25,000-record run. The pipeline spends nearly
+all its time waiting on the network, and I have one measurement that makes
+that concrete. Raising `PAGE_SIZE` from 100 to 1,000 cut the request count by
+10x and took the run from 20,000 records in 4m 18s to 25,000 records in
+2m 21s. More records in about half the time, with no change to any of the
+processing code.
 
-Optimising the Python here would accomplish nothing. The remaining time is
-network round trips.
+There is nothing to gain from optimizing the Python. The remaining time is
+round trips.
 
 ## Layout
 
 ```
-core/           validator.py, normalizer.py     pure logic, no I/O
+core/           validator.py, normalizer.py     pure functions, no I/O
 db/             schema.sql, connection.py, writer.py
 pipeline/       fetcher.py, run.py
-tests/          pytest, aimed at core/
+tests/          pytest, covering core/
 ```
 
 ## Setup
@@ -215,21 +233,21 @@ echo "DATABASE_URL=postgresql://$USER@localhost:5432/thwart" > .env
 python -m pipeline.run
 ```
 
-Requires PostgreSQL running locally. Tests: `pytest`.
+You need PostgreSQL running locally. Run the tests with `pytest`.
 
 ## Known gaps
 
-- **`content_type` is hardcoded to `"text"`.** Nearly every section has a
-  `_table` twin (`warnings` and `warnings_table`) carrying an HTML
-  representation of the same content. The schema has the column to distinguish
-  them; the normalizer does not yet populate it.
-- **No retry or backoff.** A single network failure or a 429 ends the run. The
-  keyless rate limit is 240 requests/minute and 1,000/day per IP.
-- **`int(record["version"])` will raise on a non-numeric version.** Not
-  observed in 25,000 records, but it belongs in the validator rather than as a
+- `content_type` is hardcoded to `"text"`. Most sections have a `_table` twin
+  (`warnings` and `warnings_table`) that carries an HTML version of the same
+  content. The schema has a column for this but the normalizer does not fill
+  it in yet.
+- No retry or backoff. One network failure or a 429 ends the run. Without an
+  API key the limit is 240 requests per minute and 1,000 per day per IP.
+- `int(record["version"])` raises on a non-numeric version. I never saw one in
+  25,000 records, but that check belongs in the validator rather than as a
   runtime exception.
-- **Rejections and skipped sections are printed, not persisted.** A reject log
-  table would make them queryable and let the counts be compared across runs.
-- **`effective_time` is passed through as the source string** (`"20210902"`).
-  PostgreSQL parses it into the `DATE` column, but the conversion is implicit
-  rather than explicit.
+- Rejections and skipped sections are printed, not stored. A reject log table
+  would make them queryable and let counts be compared between runs.
+- `effective_time` is passed through as the source string (`"20210902"`).
+  Postgres parses it into the `DATE` column on insert, but I would rather the
+  conversion be explicit.
