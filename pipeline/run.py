@@ -53,6 +53,7 @@ def run(max_records=1000):
     print("\n--- reject reasons ---")
     for reason, count in reject_reasons.most_common():
         print(f"{count:5d}  {reason}")
+    print(f"\ntotal empty sections skipped: {sum(empty_sections.values())}")
     print("\n--- empty sections skipped ---")
     for name, count in empty_sections.most_common(10):
         print(f"{count:5d}  {name}")
