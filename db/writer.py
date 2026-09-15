@@ -31,9 +31,11 @@ def insert_label(conn, label):
             """
             INSERT INTO label (id, set_id, version, effective_time)
             VALUES (%s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
             """,
             (label["id"], label["set_id"], label["version"], label["effective_time"]),
         )
+        return cur.rowcount
 
 
 def insert_sections(conn, cache, label_id, sections):

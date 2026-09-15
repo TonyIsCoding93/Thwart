@@ -13,9 +13,10 @@ def fetch_page(skip=0, limit=PAGE_SIZE):
 def fetch_all(max_records=1000):
     skip = 0
     while skip < max_records:
-        results = fetch_page(skip=skip)
+        limit = min(PAGE_SIZE, max_records - skip)
+        results = fetch_page(skip=skip, limit=limit)
         if not results:
             break
         for record in results:
             yield record
-        skip += PAGE_SIZE
+        skip += len(results)

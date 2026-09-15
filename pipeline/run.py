@@ -31,7 +31,9 @@ def run(max_records=1000):
             label, sections, skipped = normalize(record)
             for name in skipped:
                 empty_sections[name] += 1
-            insert_label(conn, label)
+            if insert_label(conn, label) == 0:
+                stats["skipped_existing"] += 1
+                continue
             insert_sections(conn, cache, label["id"], sections)
             stats["inserted"] += 1
         except Exception as e:
