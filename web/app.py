@@ -12,7 +12,14 @@ st.set_page_config(page_title="Thwart", layout="wide")
 st.title("Thwart")
 st.caption("Paste an openFDA drug label record. See what the pipeline would do with it.")
 
-raw = st.text_area("Record (JSON)", height=300)
+if "raw" not in st.session_state:
+    st.session_state.raw = ""
+
+if st.button("Load example record"):
+    sample_path = Path(__file__).parent / "sample.json"
+    st.session_state.raw = sample_path.read_text()
+
+raw = st.text_area("Record (JSON)", height=300, key="raw")
 
 if raw:
     try:
@@ -46,3 +53,9 @@ if raw:
     with right:
         st.subheader(f"label_section rows ({len(sections)})")
         st.dataframe(sections, use_container_width=True)
+
+
+
+## cd ~/GitHub/thwart
+## source venv/bin/activate
+## streamlit run web/app.py 
